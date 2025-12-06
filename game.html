@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resident Raver - HTML5 Version</title>
+    <style>
+        body {
+            background-color: #202020;
+            color: #eee;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        h1 { margin-bottom: 10px; font-size: 24px; text-transform: uppercase; letter-spacing: 2px; }
+        #gameContainer {
+            position: relative;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            border: 4px solid #444;
+        }
+        canvas {
+            display: block;
+            background-color: #1a1a1a; /* Dark background like the dorm */
+        }
+        #controls {
+            margin-top: 15px;
+            font-size: 14px;
+            color: #aaa;
+            text-align: center;
+        }
+        .key {
+            display: inline-block;
+            background: #444;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #fff;
+            font-weight: bold;
+            margin: 0 2px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Resident Raver</h1>
+    
+    <div id="gameContainer">
+        <canvas id="gameCanvas" width="640" height="320"></canvas>
+    </div>
+
+    <div id="controls">
+        Controls: <span class="key">←</span> <span class="key">→</span> to Move | <span class="key">Z</span> or <span class="key">Space</span> to Jump | <span class="key">X</span> to Shoot
+    </div>
+
+    <script>
+        // --- GAME CONSTANTS & CONFIGURATION ---
+        // Based on Chapter 4 mechanics
+        const TILE_SIZE = 32;
+        const GRAVITY = 0.8;
+        const FRICTION = 0.8;
+        const JUMP_FORCE = -12;
+        const MOVE_SPEED = 1.5; // Acceleration
+        const MAX_SPEED = 5;
+        
+        // --- ASSET GENERATION (SVGs for Pixel Art Look) ---
+        // We create simple SVG strings to replicate the book's assets without external files
+        const SPRITES = {
+            player: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect x="4" y="2" width="8" height="14" fill="#e74c3c"/><rect x="4" y="2" width="8" height="4" fill="#f1c40f"/><rect x="5" y="3" width="2" height="2" fill="black"/><rect x="9" y="3" width="2" height="2" fill="black"/></svg>`,
+            zombie: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect x="4" y="2" width="8" height="14" fill="#2ecc71"/><rect x="5" y="4" width="2" height="2" fill="#c0392b"/><rect x="9" y="4" width="2" height="2" fill="#c0392b"/><rect x="4" y="10" width="8" height="2" fill="#27ae60"/></svg>`,
+            wall:   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="#5d4037"/><rect x="0" y="0" width="16" height="16" fill="none" stroke="#3e2723" stroke-width="2"/><rect x="2" y="2" width="5" height="4" fill="#4e342e"/><rect x="9" y="8" width="5" height="4" fill="#4e342e"/></svg>`,
+            bullet: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3" fill="#f39c12"/></svg>`
+        };
+
+        // Helper to draw SVGs to canvas
+        const images = {};
+        for(let key in SPRITES) {
+            const img = new Image();
+            img.src = 'data:image/svg+xml;base64,' + btoa(SPRITES[key]);
+            images[key] = img;
+        }
+
+        // --- MAP DATA ---
+        // 1 = Wall, 0 = Air. Modeled after Figure 4-10 in the PDF
+        const LEVEL_MAP = [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,1,0,0,1,0,0,0,1],
+            [1,0,0,0,1,1,0,0,0,0,0,0,0,0,0,1,0,0,0,1],
+            [1,0,0,0,1,1,0,0,0,0,0,0,0,0,0,1,1,1,1,1],
+            [1,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,1],
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        ];
+
+        // --- GAME ENGINE CLASSES ---
+
+        class Entity {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.width = TILE_SIZE;
+                this.height = TILE_SIZE;
+                this.velX = 0;
+                this.velY = 0;
+                this.type = type; // 'player', 'zombie', 'bullet'
+                this.isDead = false;
+                this.facingRight = true;
+            }
+
+            update() {
+                // Apply Gravity
+                this.velY += GRAVITY;
+
+                // Move X
+                this.x += this.velX;
+                this.handleCollision(true); // Check horizontal collisions
+
+                // Move Y
+                this.y += this.velY;
+                this.handleCollision(false); // Check vertical collisions
+            }
+
+            draw(ctx) {
+                if (images[this.type]) {
+                    ctx.save();
+                    if (!this.facingRight) {
+                        ctx.translate(this.x + this.width, this.y);
+                        ctx.scale(-1, 1);
+                        ctx.drawImage(images[this.type], 0, 0, this.width, this.height);
+                    } else {
+                        ctx.drawImage(images[this.type], this.x, this.y, this.width, this.height);
+                    }
+                    ctx.restore();
+                } else {
+                    ctx.fillStyle = 'red';
+                    ctx.fillRect(this.x, this.y, this.width, this.height);
+                }
+            }
+
+            handleCollision(horizontal) {
+                // Simple grid-based collision logic
+                // Check corners of the entity
+                const checkTile = (x, y) => {
+                    const tileX = Math.floor(x / TILE_SIZE);
+                    const tileY = Math.floor(y / TILE_SIZE);
+                    if (tileY < 0 || tileY >= LEVEL_MAP.length || tileX < 0 || tileX >= LEVEL_MAP[0].length) return 1; // Out of bounds is wall
+                    return LEVEL_MAP[tileY][tileX];
+                };
+
+                // Check collision points based on direction
+                if (horizontal) {
+                    if (checkTile(this.x, this.y) || checkTile(this.x, this.y + this.height - 1) || 
+                        checkTile(this.x + this.width, this.y) || checkTile(this.x + this.width, this.y + this.height - 1)) {
+                        
+                        // Collision happened
+                        if (this.velX > 0) this.x = Math.floor(this.x / TILE_SIZE) * TILE_SIZE; // Hit right wall
+                        if (this.velX < 0) this.x = Math.floor(this.x / TILE_SIZE) * TILE_SIZE + TILE_SIZE; // Hit left wall
+                        this.collideWall();
+                    }
+                } else {
+                    if (checkTile(this.x, this.y) || checkTile(this.x + this.width - 1, this.y) ||
+                        checkTile(this.x, this.y + this.height) || checkTile(this.x + this.width - 1, this.y + this.height)) {
+                        
+                        // Collision happened
+                        if (this.velY > 0) { // Hit floor
+                            this.y = Math.floor(this.y / TILE_SIZE) * TILE_SIZE;
+                            this.velY = 0;
+                            this.onGround = true;
+                        }
+                        if (this.velY < 0) { // Hit ceiling
+                            this.y = Math.floor(this.y / TILE_SIZE) * TILE_SIZE + TILE_SIZE;
+                            this.velY = 0;
+                        }
+                    } else {
+                        this.onGround = false;
+                    }
+                }
+            }
+            
+            collideWall() {
+                // Default behavior: stop
+                this.velX = 0;
+            }
+        }
+
+        class Player extends Entity {
+            constructor(x, y) {
+                super(x, y, 'player');
+                this.width = 24; // Player is slightly thinner than a tile
+                this.height = 30;
+                this.offsetX = 4; // Visual offset
+            }
+
+            update(input) {
+                // Horizontal Movement
+                if (input.left) {
+                    this.velX -= MOVE_SPEED;
+                    this.facingRight = false;
+                }
+                if (input.right) {
+                    this.velX += MOVE_SPEED;
+                    this.facingRight = true;
+                }
+
+                // Friction
+                this.velX *= FRICTION;
+                
+                // Cap speed
+                if (this.velX > MAX_SPEED) this.velX = MAX_SPEED;
+                if (this.velX < -MAX_SPEED) this.velX = -MAX_SPEED;
+
+                // Jump
+                if (input.jump && this.onGround) {
+                    this.velY = JUMP_FORCE;
+                    this.onGround = false;
+                }
+
+                // Check bounds
+                if (this.y > 400) this.respawn(); // Fell off world
+
+                super.update();
+            }
+
+            draw(ctx) {
+                // Draw slightly offset to center in tile
+                if (images.player) {
+                    ctx.save();
+                    if (!this.facingRight) {
+                        ctx.translate(this.x + this.width/2 + 16, this.y); // Approx center flip
+                        ctx.scale(-1, 1);
+                        ctx.drawImage(images.player, 0, 0, 32, 32);
+                    } else {
+                        ctx.drawImage(images.player, this.x - this.offsetX, this.y, 32, 32);
+                    }
+                    ctx.restore();
+                }
+            }
+
+            respawn() {
+                this.x = 64;
+                this.y = 100;
+                this.velX = 0;
+                this.velY = 0;
+            }
+        }
+
+        class Zombie extends Entity {
+            constructor(x, y) {
+                super(x, y, 'zombie');
+                this.velX = 1; // Start moving right
+                this.speed = 1;
+            }
+
+            update() {
+                // AI Logic from PDF: Walk back and forth
+                // Collision logic handled in super.handleCollision calls collideWall
+                super.update();
+            }
+
+            collideWall() {
+                // Flip direction when hitting a wall
+                this.velX = -this.velX; 
+                this.x += this.velX; // Push out slightly
+                this.facingRight = this.velX > 0;
+            }
+        }
+
+        class Bullet extends Entity {
+            constructor(x, y, direction) {
+                super(x, y, 'bullet');
+                this.width = 10;
+                this.height = 10;
+                this.velX = direction * 10; // Fast speed
+                this.lifeTime = 60; // Frames to live
+            }
+
+            update() {
+                this.x += this.velX;
+                this.lifeTime--;
+                if (this.lifeTime <= 0) this.isDead = true;
+
+                // Bullet kills self on wall collision
+                const tileX = Math.floor(this.x / TILE_SIZE);
+                const tileY = Math.floor(this.y / TILE_SIZE);
+                
+                // Bounds check
+                if (tileY >= 0 && tileY < LEVEL_MAP.length && tileX >= 0 && tileX < LEVEL_MAP[0].length) {
+                    if (LEVEL_MAP[tileY][tileX] === 1) {
+                        this.isDead = true;
+                    }
+                }
+            }
+            
+            // Bullet doesn't use gravity
+        }
+
+        // --- MAIN GAME LOGIC ---
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Input State
+        const input = { left: false, right: false, jump: false };
+        
+        // Game State
+        const player = new Player(64, 100);
+        let zombies = [];
+        let bullets = [];
+
+        // Spawn some zombies (Positions based on map)
+        zombies.push(new Zombie(300, 200));
+        zombies.push(new Zombie(500, 100));
+
+        // Input Listeners
+        window.addEventListener('keydown', (e) => {
+            if(e.code === 'ArrowLeft') input.left = true;
+            if(e.code === 'ArrowRight') input.right = true;
+            if(e.code === 'KeyZ' || e.code === 'Space') input.jump = true;
+            if(e.code === 'KeyX') shoot();
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if(e.code === 'ArrowLeft') input.left = false;
+            if(e.code === 'ArrowRight') input.right = false;
+            if(e.code === 'KeyZ' || e.code === 'Space') input.jump = false;
+        });
+
+        function shoot() {
+            // Spawn bullet at player position
+            const dir = player.facingRight ? 1 : -1;
+            const bX = player.facingRight ? player.x + player.width : player.x;
+            bullets.push(new Bullet(bX, player.y + 10, dir));
+        }
+
+        // Collision: Bullet vs Zombie & Player vs Zombie
+        function checkEntityCollisions() {
+            // Bullets vs Zombies
+            bullets.forEach(b => {
+                zombies.forEach(z => {
+                    if (!b.isDead && !z.isDead &&
+                        b.x < z.x + z.width &&
+                        b.x + b.width > z.x &&
+                        b.y < z.y + z.height &&
+                        b.y + b.height > z.y) {
+                        
+                        z.isDead = true; // Kill zombie
+                        b.isDead = true; // Remove bullet
+                    }
+                });
+            });
+
+            // Player vs Zombies
+            zombies.forEach(z => {
+                if (!z.isDead &&
+                    player.x < z.x + z.width &&
+                    player.x + player.width > z.x &&
+                    player.y < z.y + z.height &&
+                    player.y + player.height > z.y) {
+                    
+                    player.respawn(); // Player dies
+                }
+            });
+        }
+
+        function gameLoop() {
+            // 1. Clear Screen
+            ctx.fillStyle = '#1a1a1a'; // Dark gray background
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 2. Draw Map
+            for (let y = 0; y < LEVEL_MAP.length; y++) {
+                for (let x = 0; x < LEVEL_MAP[y].length; x++) {
+                    if (LEVEL_MAP[y][x] === 1) {
+                        if (images.wall) {
+                            ctx.drawImage(images.wall, x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                        } else {
+                            ctx.fillStyle = '#555';
+                            ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                        }
+                    }
+                }
+            }
+
+            // 3. Update & Draw Entities
+            player.update(input);
+            player.draw(ctx);
+
+            // Filter out dead zombies/bullets
+            zombies = zombies.filter(z => !z.isDead);
+            bullets = bullets.filter(b => !b.isDead);
+
+            zombies.forEach(z => {
+                z.update();
+                z.draw(ctx);
+            });
+
+            bullets.forEach(b => {
+                b.update();
+                b.draw(ctx);
+            });
+
+            checkEntityCollisions();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Start the game
+        gameLoop();
+
+    </script>
+</body>
+</html>
